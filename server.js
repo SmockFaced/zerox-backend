@@ -3,23 +3,19 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
-const helmet = require('helmet'); // Add this
+const helmet = require('helmet');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'zerox-super-secret-key-CHANGE-THIS-IN-PRODUCTION';
+const JWT_SECRET = process.env.JWT_SECRET || 'zerox-super-secret-key-CHANGE-THIS-IN-PRODUCTION-2026';
 
 app.use(helmet());
-app.use(cors({ origin: '*' })); // Change to your frontend URL later
+app.use(cors());
 app.use(express.json());
 
-// Database setup
-const db = new sqlite3.Database('./zerox.db', (err) => {
-  if (err) console.error(err);
-  else console.log('Connected to SQLite database');
-});
+// Database
+const db = new sqlite3.Database('./zerox.db');
 
-// Create tables
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,58 +36,46 @@ db.serialize(() => {
     user_id INTEGER,
     product TEXT,
     amount REAL,
-    date TEXT,
-    status TEXT
+    date TEXT DEFAULT CURRENT_TIMESTAMP,
+    status TEXT DEFAULT 'Active'
   )`);
 
-  // Seed default admin + user if empty
+  // Seed default accounts
   db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
     if (row.count === 0) {
-      const hashedAdmin = bcrypt.hashSync('admin123', 10);
-      const hashedUser = bcrypt.hashSync('demo', 10);
-      db.run("INSERT INTO users (username, password, role, balance) VALUES (?, ?, ?, ?)", 
-        ['admin', hashedAdmin, 'admin', 0]);
-      db.run("INSERT INTO users (username, password, role, balance) VALUES (?, ?, ?, ?)", 
-        ['smockfaced', hashedUser, 'user', 0]);
+      const adminHash = bcrypt.hashSync('admin123', 10);
+      const userHash = bcrypt.hashSync('demo', 10);
+      
+      db.run("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ['admin', adminHash, 'admin']);
+      db.run("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ['smockfaced', userHash, 'user']);
     }
   });
 
-  // Seed some products
+  // Seed products
   db.get("SELECT COUNT(*) as count FROM products", (err, row) => {
     if (row.count === 0) {
       db.run("INSERT INTO products (name, price) VALUES (?, ?)", ["Rogue Company Day", 2.50]);
       db.run("INSERT INTO products (name, price) VALUES (?, ?)", ["Rogue Company Week", 7.50]);
       db.run("INSERT INTO products (name, price) VALUES (?, ?)", ["HWID Spoofer Month", 10]);
+      db.run("INSERT INTO products (name, price) VALUES (?, ?)", ["Chess Month", 4]);
     }
   });
 });
 
-// Middleware to verify JWT
+// Middleware
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
+  if (!token) return res.status(401).json({ error: "Access denied" });
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
+    if (err) return res.status(403).json({ error: "Invalid token" });
     req.user = user;
     next();
   });
 }
 
 // ==================== AUTH ROUTES ====================
-app.post('/api/register', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: "Missing fields" });
-
-  const hashed = await bcrypt.hash(password, 10);
-  db.run("INSERT INTO users (username, password, role, balance) VALUES (?, ?, ?, ?)", 
-    [username, hashed, 'user', 0], function(err) {
-      if (err) return res.status(400).json({ error: "Username already exists" });
-      res.json({ message: "User created" });
-    });
-});
-
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
 
@@ -101,81 +85,57 @@ app.post('/api/login', (req, res) => {
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(401).json({ error: "Invalid credentials" });
 
-    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role }, 
+      JWT_SECRET, 
+      { expiresIn: '7d' }
+    );
+
     res.json({ token, role: user.role, username: user.username });
   });
 });
 
-// ==================== USER ROUTES ====================
+// Get current user
 app.get('/api/me', authenticateToken, (req, res) => {
   db.get("SELECT id, username, role, balance FROM users WHERE id = ?", [req.user.id], (err, user) => {
     res.json(user);
   });
 });
 
+// Buy Credits
 app.post('/api/buy-credits', authenticateToken, (req, res) => {
-  const amount = 250;
-  db.run("UPDATE users SET balance = balance + ? WHERE id = ?", [amount, req.user.id], function(err) {
+  db.run("UPDATE users SET balance = balance + 250 WHERE id = ?", [req.user.id], function(err) {
     if (err) return res.status(500).json({ error: "Failed" });
     db.get("SELECT balance FROM users WHERE id = ?", [req.user.id], (err, row) => {
-      res.json({ message: "Credits added", balance: row.balance });
+      res.json({ message: "250 Credits added", balance: row.balance });
     });
   });
 });
 
-// ==================== ADMIN ROUTES ====================
-app.get('/api/admin/users', authenticateToken, (req, res) => {
-  if (req.user.role !== 'admin') return res.sendStatus(403);
-  db.all("SELECT id, username, role, balance FROM users", [], (err, rows) => {
-    res.json(rows);
-  });
-});
-
-app.post('/api/admin/users', authenticateToken, (req, res) => {
-  if (req.user.role !== 'admin') return res.sendStatus(403);
-  const { username, password, role } = req.body;
-  const hashed = bcrypt.hashSync(password, 10);
-  db.run("INSERT INTO users (username, password, role, balance) VALUES (?, ?, ?, ?)", 
-    [username, hashed, role || 'user', 0], function(err) {
-      if (err) return res.status(400).json({ error: "Error creating user" });
-      res.json({ id: this.lastID });
-    });
-});
-
-app.put('/api/admin/users/:id/balance', authenticateToken, (req, res) => {
-  if (req.user.role !== 'admin') return res.sendStatus(403);
-  const { balance } = req.body;
-  db.run("UPDATE users SET balance = ? WHERE id = ?", [balance, req.params.id], (err) => {
-    if (err) return res.status(500).json({ error: "Failed" });
-    res.json({ message: "Balance updated" });
-  });
-});
-
-// Products
+// Get Products
 app.get('/api/products', (req, res) => {
   db.all("SELECT * FROM products", [], (err, rows) => res.json(rows));
 });
 
+// ==================== ADMIN ROUTES ====================
+app.get('/api/admin/users', authenticateToken, (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admin only" });
+  db.all("SELECT id, username, role, balance FROM users", [], (err, rows) => res.json(rows));
+});
+
+app.put('/api/admin/users/:id/balance', authenticateToken, (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admin only" });
+  const { balance } = req.body;
+  db.run("UPDATE users SET balance = ? WHERE id = ?", [balance, req.params.id], () => {
+    res.json({ message: "Balance updated" });
+  });
+});
+
 app.post('/api/admin/products', authenticateToken, (req, res) => {
-  if (req.user.role !== 'admin') return res.sendStatus(403);
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admin only" });
   const { name, price } = req.body;
   db.run("INSERT INTO products (name, price) VALUES (?, ?)", [name, price], function(err) {
     res.json({ id: this.lastID });
-  });
-});
-
-app.put('/api/admin/products/:id', authenticateToken, (req, res) => {
-  if (req.user.role !== 'admin') return res.sendStatus(403);
-  const { name, price } = req.body;
-  db.run("UPDATE products SET name = ?, price = ? WHERE id = ?", [name, price, req.params.id], (err) => {
-    res.json({ message: "Updated" });
-  });
-});
-
-app.delete('/api/admin/products/:id', authenticateToken, (req, res) => {
-  if (req.user.role !== 'admin') return res.sendStatus(403);
-  db.run("DELETE FROM products WHERE id = ?", [req.params.id], (err) => {
-    res.json({ message: "Deleted" });
   });
 });
 
